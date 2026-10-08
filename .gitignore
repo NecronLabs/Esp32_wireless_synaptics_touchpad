@@ -1,0 +1,26 @@
+# Arduino / PlatformIO build artifacts
+*.bin
+*.hex
+*.elf
+build/
+.cache/
+*.o
+*.d
+
+# IDE & Editor folders
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
