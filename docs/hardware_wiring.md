@@ -4,57 +4,46 @@ This document details the physical wiring, electrical considerations, and troubl
 
 ---
 
-## The Hardware: Synaptics TM3096 (T1321B IC)
+## 1. The Hardware: Synaptics TM3096 (T1321B IC)
 The touchpad was salvaged from an older Dell laptop. On the underside, it features the Synaptics **T1321B** ASIC.
 
 ```
-Touchpad Connector: 8-pin FPC (0.5mm / 1.0mm pitch depending on revision)
+Touchpad Connector: 8-pin FPC
 Pin 4: Verified GND (continuity to copper shield / ground plane)
-Pin 2/3/Test pads: VCC (3.3V), CLK, DATA
+Signal/Power: Direct test pads on underside & connector
 ```
 
 ---
 
-## Schematic / Wiring
+## 2. Reverse-Engineering Pinout & Power
 
-```
-         Synaptics TM3096 (T1321B)
-        ┌─────────────────────────┐
-        │                         │
-        │  [VCC]  [GND] [CLK] [DATA]
-        └───┬───────┬─────┬─────┬─┘
-            │       │     │     │
-            │       │  ┌──┴──┐ ┌┴───┐
-            │       │ 10kΩ  10kΩ    Pull-up resistors
-            │       │  └──┬──┘ └┬───┘
-            │       │     └──┬──┘
-            │       │        │
-            ▼       ▼        ▼
-          3.3V     GND      3.3V
-            ▲       ▲
-            │       │     ┌─────────┐
-            │       │     │  GPIO16 │ (PS/2 CLK)
-            │       │     │  GPIO17 │ (PS/2 DATA)
-            │       │     │  GPIO2  │ (Status LED)
-            └───────┴─────┴─────────┘
-                        ESP32
-```
+### Locating Ground
+- Online pinouts claimed Pin 1 was GND and Pin 2 was VCC. Probing proved this false.
+- Multimeter continuity testing against the large exposed ground plane and metal chassis confirmed **only Pin 4 connects to GND**.
+
+### Locating Signal Lines (Diode Test Method)
+- With the board unpowered, set your multimeter to Diode Check (red probe on GND, black probe on unknown pins).
+- The CLK and DATA lines produce forward diode drops (~0.5V to 0.7V) due to internal CMOS ESD clamp diodes.
+- VCC lines show open circuit or a slow capacitive charging curve.
+
+### Safe Operating Voltage
+- Laptop trackpads can be 5V or 3.3V. Applying 5V to a 3.3V ASIC will permanently burn the IC.
+- Probing decoupling capacitors and tracing the power plane to the input of the T1321B confirmed the chip runs natively on **3.3V**. Power is supplied directly from the ESP32's onboard 3.3V regulator rail.
 
 ---
 
-## Electrical Rules & Gotchas
+## 3. Pull-Up Resistor Network (Eliminating Bus Noise)
 
-### 1. No Series Resistors on VCC
-During initial prototyping, a 1kΩ resistor was placed in series with VCC to protect the board.
-* **Result:** The touchpad drew 20–40 mA, which dropped 20V–40V across the 1kΩ resistor. The chip received near 0V and remained dead.
-* **Rule:** Connect the ESP32's 3.3V regulator pin directly to the touchpad VCC pad.
+PS/2 is an open-collector (open-drain) bus. The touchpad and microcontroller only pull lines LOW; external resistors must pull lines HIGH to 3.3V.
 
-### 2. Pull-up Resistor Value: Why 10kΩ?
-PS/2 lines are open-collector. Both device and microcontroller only pull lines LOW; external resistors pull them HIGH to 3.3V.
-* **Why not 1kΩ?** Pulling a 1kΩ line low requires sinking 3.3 mA per line. The internal open-drain FETs on the Synaptics chip are tiny and can overheat, plus it wastes significant battery.
-* **Why 10kΩ?** At PS/2 clock speeds (~12 kHz), the RC rise time with 10kΩ is ~1 µs, which is well within the 60 µs clock period. It provides crisp digital signals with minimal power draw.
+```
+ESP32 GPIO 16 (CLK)  ──┬──[10kΩ]── 3.3V
+                       └── Touchpad CLK
 
-### 3. Pin Mapping via Multimeter
-If working with a bare board or test pads:
-1. **Find GND:** Set multimeter to continuity mode. Touch one probe to the large metal backing/ground plane. Probe pads until you hear a beep. On our connector, only **Pin 4** beeped.
-2. **Find Signal Lines:** With the touchpad unpowered, signal lines will show a ~0.5V–0.7V forward diode drop to GND (ESD diodes). VCC shows open/charging capacitor behavior.
+ESP32 GPIO 17 (DATA) ──┬──[10kΩ]── 3.3V
+                       └── Touchpad DATA
+```
+
+* **Why external pull-ups are essential:** Without them, floating lines pick up capacitive coupling and EMI noise across jumper wires, resulting in phantom clock edges, framing errors, and parity mismatch errors.
+* **Why the internal pull-up is insufficient:** ESP32's internal `INPUT_PULLUP` is ~45kΩ. With breadboard parasitic capacitance (~50–100 pF), the RC rise time exceeds 15 µs, deforming clock edges.
+* **Why 10kΩ over 1kΩ:** 1kΩ pulls 3.3 mA per line through the tiny open-drain transistors on the Synaptics ASIC, creating unnecessary heat and battery drain. 10kΩ provides clean ~1 µs rise times at the ~12 kHz clock frequency with minimal power draw.

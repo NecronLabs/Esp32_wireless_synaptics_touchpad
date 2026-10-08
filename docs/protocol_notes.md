@@ -1,59 +1,28 @@
 # Protocol Architecture: PS/2 vs. I2C vs. Windows PTP
 
 ## 1. Why PS/2 Absolute Mode Won Over I2C / SMBus
-During experimentation, we tested whether the TM3096 could be driven over I2C/SMBus.
-- An I2C scan successfully detected address `0x2C` (Synaptics RMI4 address).
+During bringup, we investigated whether the TM3096 could be driven over I2C/SMBus:
+- An I2C scan detected address `0x2C` (Synaptics RMI4 address).
 - However, reading input reports from the HID descriptor resulted in static zeros (`01 00 00 00`, `X=0 Y=0 Z=0`).
-- **Reason:** In modern laptops, Synaptics touchpads rely on ACPI power states, host-issued GPIO reset pulses, and custom register configuration sequences that are complex to reverse-engineer on a microcontroller.
-- **PS/2 Absolute Mode (`0xC1`)**, by contrast, is fully self-contained. It is activated via standard PS/2 sliced commands (`0xE8` nibble sequence) and streams raw 6-byte packets synchronously.
+- Modern laptop I2C touchpads depend on ACPI host power management, GPIO reset handshakes, and proprietary vendor initialization registers.
+- **PS/2 Absolute Mode (`0xC1`)**, by contrast, is self-contained, robust, and streams raw 6-byte absolute coordinates independently of any operating system drivers.
 
 ---
 
-## 2. Synaptics Absolute Packet Structure (6 Bytes)
+## 2. Solving Windows Latency & Stuttering Bugs
 
-When configured with mode `0xC1`, the touchpad sends 6-byte packets:
-```
-Byte 0: [ 1  0  W3 W2   1  W1  R   L  ]
-Byte 1: [ Y11 Y10 Y9 Y8 X11 X10 X9 X8 ]
-Byte 2: [ Z7  Z6  Z5 Z4  Z3  Z2 Z1 Z0 ]  (Pressure)
-Byte 3: [ 1  1  Y12 X12 0  W0  R^L M  ]
-Byte 4: [ X7  X6  X5 X4  X3  X2 X1 X0 ]
-Byte 5: [ Y7  Y6  Y5 Y4  Y3  Y2 Y1 Y0 ]
-```
+### Bug 1: BLE Preemption Packet Drops
+- *Problem:* In polling mode, when the ESP32 FreeRTOS BLE stack took CPU cycles to manage radio advertising and packet notifications, the CPU missed the ~12 kHz falling clock edges on PS/2. A single dropped bit corrupted packet framing.
+- *Solution:* An interrupt service routine (`attachInterrupt` on CLK falling edge) with `IRAM_ATTR` saves incoming bits into a volatile 64-byte circular buffer (`ps2Buf`). The ISR captures clock edges in microseconds without data loss.
 
-### Multi-Touch / AGM (Advanced Gesture Mode)
-The $W$ value indicates finger count and packet type:
-* **$W = 2$:** AGM packet. The coordinates encode the **Secondary Finger** ($X_2, Y_2, Z_2$).
-* **$W = 0$:** Indicates **2 fingers** on pad.
-* **$W = 1$:** Indicates **3 fingers** on pad.
-* **$W \ge 4$:** Indicates **1 finger** on pad ($W$ represents finger width).
-* **$Z < 12$:** Finger lifted.
+### Bug 2: BLE Buffer Saturation & Lag
+- *Problem:* Streaming every decoded packet over BLE flooded the notification buffer, causing a 200–400 ms rubber-band input lag.
+- *Solution:* Implemented an ~80 Hz (12 ms) rate limiter for continuous tracking, while giving finger release events (`Tip=0`) and button clicks `urgent` priority so they flush immediately with zero delay.
 
----
+### Bug 3: Multi-Touch AGM Coordinate Desync
+- *Problem:* Synaptics sends multi-touch data in two sequential packets: an AGM packet ($W=2$) carrying Finger 2, followed by a primary packet ($W=0$ or $1$) carrying Finger 1. Sending reports on every raw packet caused Windows to receive alternating 1-finger and 2-finger frames, causing violent scroll judder.
+- *Solution:* The firmware buffers the AGM packet ($W=2$) and only dispatches the unified PTP report when the primary packet arrives (`if (!gTouch.isAgm) sendPtpReport()`).
 
-## 3. Windows Precision Touchpad (PTP) HID Translation
-
-Instead of emulating a mouse (relative deltas), the ESP32 acts as a **Digitizer Touchpad** (`Usage Page 0x0D`, `Usage 0x05`).
-
-### Coordinate Mapping
-- Synaptics coordinates: $(0, 0)$ is bottom-left. Range: $0 \dots 8191$.
-- Windows PTP coordinates: $(0, 0)$ is top-left. Range: $0 \dots 8191$.
-- Inversion applied:
-  ```cpp
-  mappedY = 8191 - touchY;
-  ```
-
-### Contact Reporting
-For each frame, the ESP32 sends:
-1. **Finger 1:** Contact ID 1, Tip Switch (1 = touching, 0 = released), Confidence bit, $X$, $Y$.
-2. **Finger 2:** Contact ID 2, Tip Switch, Confidence bit, $X_2$, $Y_2$.
-3. **Finger 3:** Contact ID 3, Tip Switch, Confidence bit, $X_3$, $Y_3$.
-4. **Scan Time:** Relative 100 µs timestamp.
-5. **Contact Count:** Number of active contacts.
-6. **Buttons:** Physical Left / Right button bits.
-
-Because Windows receives a genuine PTP report, Windows' built-in driver handles:
-- Inertial scrolling
-- Pinch-to-zoom
-- 3-finger swipe (Task View / virtual desktops)
-- Palm rejection
+### Bug 4: Phantom Touches on Finger Lift
+- *Problem:* Abruptly stopping transmission when pressure dropped ($Z < 12$) left Windows with no contact release event, assuming the finger was still held down.
+- *Solution:* Implemented active contact lifecycle tracking (`f1_active`, `f2_active`, `f3_active`). When pressure drops below threshold, the firmware sends an explicit lift report with `Tip=0, Conf=0` for each active contact ID before going idle.
