@@ -21,7 +21,7 @@
 // PTP HID Report Descriptor
 const uint8_t hidReportDescriptor[] = {
   0x05, 0x0D,                         // Usage Page (Digitizer)
-  0x09, 0x05,                         // Usage (Touch Pad)
+  0x09, 0x05,                         // Usage (Touc h Pad)
   0xA1, 0x01,                         // Collection (Application)
   0x85, 0x01,                         //   Report ID (1)
 
